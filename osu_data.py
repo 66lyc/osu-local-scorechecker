@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 DEFAULT_OSU_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "osu!"
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 MODE_NAMES = {
     0: "osu!standard",
@@ -77,6 +77,7 @@ class BeatmapInfo:
     audio: str
     star_rating: float = 0.0
     key_count: int = 0
+    ranked_status: int = 0
 
     @classmethod
     def from_dict(cls, data: dict) -> "BeatmapInfo":
@@ -93,6 +94,7 @@ class BeatmapInfo:
             audio=str(data.get("audio", "")),
             star_rating=float(data.get("star_rating", 0.0) or 0.0),
             key_count=int(data.get("key_count", 0) or 0),
+            ranked_status=int(data.get("ranked_status", 0) or 0),
         )
 
     @property
@@ -357,7 +359,7 @@ def _parse_osu_file(path: Path) -> BeatmapInfo:
 ProgressCallback = Callable[[int, int, str], None]
 
 
-def load_osudb_star_ratings(path: Path) -> dict[str, tuple[int, float]]:
+def load_osudb_star_ratings(path: Path) -> dict[str, tuple[int, float, int]]:
     """Read MD5 -> (mode, star rating) from osu!.db.
 
     osu!.db stores separate star rating maps for the four game modes.
@@ -375,7 +377,7 @@ def load_osudb_star_ratings(path: Path) -> dict[str, tuple[int, float]]:
         reader.i64()                 # unlock timestamp
         reader.string()              # player name
         beatmap_count = reader.i32()
-        result: dict[str, tuple[int, float]] = {}
+        result: dict[str, tuple[int, float, int]] = {}
 
         for _ in range(beatmap_count):
             if version < 20191107:
@@ -391,7 +393,7 @@ def load_osudb_star_ratings(path: Path) -> dict[str, tuple[int, float]]:
             md5 = reader.string()
             reader.string()          # osu filename
 
-            reader.u8()              # ranked status
+            ranked_status = reader.u8()
             reader.u16()             # hit circles
             reader.u16()             # sliders
             reader.u16()             # spinners
@@ -463,7 +465,7 @@ def load_osudb_star_ratings(path: Path) -> dict[str, tuple[int, float]]:
                 rating = float(
                     pairs.get(0, next(iter(pairs.values()), 0.0))
                 )
-            result[md5] = (int(mode), rating)
+            result[md5] = (int(mode), rating, int(ranked_status))
 
         return result
     except (OSError, struct.error, IndexError, ValueError):
@@ -492,10 +494,11 @@ def scan_beatmaps(
             progress(index, total, path.name)
 
     star_data = load_osudb_star_ratings(osu_dir / "osu!.db")
-    for md5, (star_mode, rating) in star_data.items():
+    for md5, (star_mode, rating, ranked_status) in star_data.items():
         info = result.get(md5)
         if info is not None:
             info.star_rating = rating
+            info.ranked_status = ranked_status
             if info.mode < 0:
                 info.mode = star_mode
 

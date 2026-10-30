@@ -22,6 +22,7 @@ from matplotlib.figure import Figure
 from PIL import Image, ImageDraw, ImageEnhance, ImageOps, ImageTk
 
 import osu_data
+from pp_calc import PPCalculator
 from osu_data import (
     BeatmapInfo,
     Score,
@@ -208,6 +209,8 @@ class ScoreWallApp:
         self._scroll_height = 1
         self._current_detail: tk.Toplevel | None = None
         self._current_history: tk.Toplevel | None = None
+        self._current_pp_window: tk.Toplevel | None = None
+        self.pp_calculator = PPCalculator()
 
         self._configure_root()
         self._configure_style()
@@ -328,6 +331,11 @@ class ScoreWallApp:
             draw.line((3, 5, 7, 5), fill=color, width=2)
             draw.line((7, 5, 9, 3), fill=color, width=2)
             draw.line((9, 3, size - 3, 3), fill=color, width=2)
+        elif kind == "pp":
+            draw.polygon(
+                [(10, 2), (4, 10), (8, 10), (6, 16), (14, 7), (10, 7)],
+                fill=color,
+            )
         elif kind == "settings":
             draw.ellipse((5, 5, size - 5, size - 5), outline=color, width=2)
             draw.ellipse((8, 8, size - 8, size - 8), outline=color, width=2)
@@ -367,6 +375,7 @@ class ScoreWallApp:
         actions.grid(row=0, column=1, rowspan=2, sticky="e")
         self._button_icons = {
             "refresh": self._make_button_icon("refresh"),
+            "pp": self._make_button_icon("pp"),
             "scan": self._make_button_icon("scan"),
             "folder": self._make_button_icon("folder"),
             "settings": self._make_button_icon("settings"),
@@ -375,6 +384,11 @@ class ScoreWallApp:
             actions, text="刷新数据", image=self._button_icons["refresh"],
             compound="left", style="Dark.TButton",
             command=self.refresh_scores,
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            actions, text="可获取PP", image=self._button_icons["pp"],
+            compound="left", style="Dark.TButton",
+            command=self.open_pp_opportunities,
         ).pack(side="left", padx=(0, 8))
         ttk.Button(
             actions, text="重新扫描谱面", image=self._button_icons["scan"],
@@ -1630,6 +1644,181 @@ class ScoreWallApp:
             buttons, text="打开选中成绩详情", style="Dark.TButton",
             command=open_selected_detail,
         ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            buttons, text="关闭", style="Accent.TButton",
+            command=win.destroy,
+        ).pack(side="right")
+        win.focus_set()
+
+    def open_pp_opportunities(self) -> None:
+        if not self.pp_calculator.available:
+            messagebox.showerror(
+                "缺少依赖",
+                "PP 估算需要安装 rosu-pp-py：\n"
+                "python -m pip install rosu-pp-py",
+                parent=self.root,
+            )
+            return
+
+        if self._current_pp_window is not None:
+            try:
+                if self._current_pp_window.winfo_exists():
+                    self._current_pp_window.destroy()
+            except tk.TclError:
+                pass
+
+        win = tk.Toplevel(self.root)
+        self._current_pp_window = win
+        win.title("可获取 PP 的本地 Ranked 成绩")
+        win.configure(bg=BG)
+        win.geometry("1080x640")
+        win.minsize(860, 520)
+        win.transient(self.root)
+        win.bind("<Escape>", lambda _event: win.destroy())
+
+        header = tk.Frame(win, bg=BG)
+        header.pack(fill="x", padx=24, pady=(18, 8))
+        header.columnconfigure(0, weight=1)
+        tk.Label(
+            header, text="可获取 PP 的本地 Ranked 成绩", bg=BG, fg=TEXT,
+            font=(FONT, 18, "bold"), anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        tk.Label(
+            header,
+            text="仅统计本地未提交成绩；PP 为单曲原始估算，实际总 PP 取决于线上个人最佳成绩",
+            bg=BG, fg=MUTED, font=(FONT, 8), anchor="w",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 0))
+
+        mode_var = tk.StringVar(value=self.mode_var.get())
+        mode_combo = ttk.Combobox(
+            header, textvariable=mode_var, values=MODE_CHOICES,
+            state="readonly", style="Dark.TCombobox", width=14,
+        )
+        mode_combo.grid(row=1, column=1, sticky="e")
+
+        summary_var = tk.StringVar()
+        tk.Label(
+            header, textvariable=summary_var, bg=BG, fg=GOLD,
+            font=(FONT, 9, "bold"), anchor="e",
+        ).grid(row=0, column=1, sticky="e", pady=(0, 24))
+
+        table_card = tk.Frame(
+            win, bg=SURFACE,
+            highlightbackground=BORDER, highlightthickness=1, bd=0,
+        )
+        table_card.pack(fill="both", expand=True, padx=24)
+        table_card.columnconfigure(0, weight=1)
+        table_card.rowconfigure(0, weight=1)
+
+        columns = (
+            "title", "difficulty", "stars", "score",
+            "accuracy", "rank", "mods", "pp", "time",
+        )
+        tree = ttk.Treeview(
+            table_card, columns=columns, show="headings",
+            selectmode="browse", style="History.Treeview",
+        )
+        headings = {
+            "title": "谱面", "difficulty": "难度", "stars": "星级",
+            "score": "分数", "accuracy": "准确率", "rank": "评级",
+            "mods": "模组", "pp": "预计PP", "time": "时间",
+        }
+        widths = {
+            "title": 230, "difficulty": 130, "stars": 65,
+            "score": 90, "accuracy": 80, "rank": 55,
+            "mods": 80, "pp": 85, "time": 140,
+        }
+        for key in columns:
+            tree.heading(key, text=headings[key])
+            tree.column(
+                key, width=widths[key], minwidth=50,
+                anchor="e" if key in ("score", "pp", "stars") else "center"
+                if key != "title" else "w",
+            )
+        scrollbar = ttk.Scrollbar(
+            table_card, orient="vertical", command=tree.yview,
+            style="Vertical.TScrollbar",
+        )
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        tree.tag_configure("top_pp", foreground=GOLD)
+
+        rows: list[tuple[float, Score]] = []
+
+        def refresh(_event=None) -> None:
+            selected_mode = MODE_FILTERS.get(mode_var.get(), 0)
+            best_by_map: dict[str, tuple[float, Score]] = {}
+            for score in self.scores:
+                if score.mode != selected_mode:
+                    continue
+                beatmap = score.beatmap
+                if beatmap is None:
+                    continue
+                if beatmap.ranked_status not in (3, 4, 5):
+                    continue
+                if score.online_id != 0:
+                    continue
+                pp_value = self.pp_calculator.calculate(score)
+                if pp_value is None or pp_value <= 0:
+                    continue
+                current = best_by_map.get(beatmap.md5)
+                if current is None or pp_value > current[0]:
+                    best_by_map[beatmap.md5] = (pp_value, score)
+
+            nonlocal rows
+            rows = sorted(
+                best_by_map.values(), key=lambda item: item[0], reverse=True
+            )
+            tree.delete(*tree.get_children())
+            for index, (pp_value, score) in enumerate(rows):
+                beatmap = score.beatmap
+                tree.insert(
+                    "", "end", iid=str(index),
+                    values=(
+                        beatmap.display_title if beatmap else "未知谱面",
+                        beatmap.version if beatmap else "-",
+                        f"{beatmap.star_rating:.2f}" if beatmap and beatmap.star_rating else "-",
+                        f"{score.score:,}",
+                        f"{score.accuracy:.2f}%",
+                        score.rank,
+                        score.mods_label,
+                        f"{pp_value:.2f}",
+                        score.when.strftime("%Y-%m-%d %H:%M"),
+                    ),
+                    tags=("top_pp",) if index == 0 else (),
+                )
+
+            if rows:
+                top_pp = rows[0][0]
+                average_pp = sum(item[0] for item in rows) / len(rows)
+                summary_var.set(
+                    f"{len(rows)} 张候选谱面 · 最高 {top_pp:.2f}pp · 平均 {average_pp:.2f}pp"
+                )
+                tree.selection_set("0")
+            else:
+                summary_var.set("没有找到未提交的 Ranked 成绩")
+
+        def open_selected() -> None:
+            selection = tree.selection()
+            if not selection:
+                messagebox.showinfo(
+                    "提示", "请先选择一条成绩。", parent=win
+                )
+                return
+            self.show_score_detail(rows[int(selection[0])][1])
+
+        tree.bind("<Double-1>", lambda _event: open_selected())
+        tree.bind("<Return>", lambda _event: open_selected())
+        mode_combo.bind("<<ComboboxSelected>>", refresh)
+        refresh()
+
+        buttons = tk.Frame(win, bg=BG)
+        buttons.pack(fill="x", padx=24, pady=14)
+        ttk.Button(
+            buttons, text="打开选中成绩详情", style="Dark.TButton",
+            command=open_selected,
+        ).pack(side="left")
         ttk.Button(
             buttons, text="关闭", style="Accent.TButton",
             command=win.destroy,
