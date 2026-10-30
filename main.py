@@ -1676,7 +1676,7 @@ class ScoreWallApp:
         return skill_stars, skill_accuracy, top[0][0]
 
     def _build_recommendations(
-        self, mode: int
+        self, mode: int, min_stars: float, max_stars: float
     ) -> tuple[list[dict], tuple[float, float, float]]:
         skill_stars, skill_accuracy, best_pp = self._estimate_skill(mode)
         if skill_stars <= 0:
@@ -1700,8 +1700,8 @@ class ScoreWallApp:
             if pp_value > previous:
                 local_best[score.beatmap_md5] = pp_value
 
-        lower = max(0.0, skill_stars - 1.2)
-        upper = skill_stars + 1.2
+        lower = min_stars
+        upper = max_stars
         recommendations: list[dict] = []
 
         for beatmap in self.beatmaps.values():
@@ -1713,7 +1713,7 @@ class ScoreWallApp:
                 continue
             if beatmap.star_rating <= 0:
                 continue
-            if not (lower <= beatmap.star_rating <= upper):
+            if not ((lower - 0.2) <= beatmap.star_rating <= (upper + 0.2)):
                 continue
 
             target_accuracy = min(
@@ -1729,6 +1729,8 @@ class ScoreWallApp:
             if preview is None:
                 continue
             target_pp, stars, max_combo = preview
+            if not (lower <= stars <= upper):
+                continue
             current_pp = local_best.get(beatmap.md5, 0.0)
             gain = target_pp - current_pp
             if gain <= 0.5:
@@ -1903,6 +1905,43 @@ class ScoreWallApp:
             font=(FONT, 9, "bold"), anchor="e",
         ).grid(row=0, column=1, sticky="e", pady=(0, 24))
 
+        range_start_var = tk.StringVar()
+        range_end_var = tk.StringVar()
+        range_row = tk.Frame(header, bg=BG)
+        range_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        tk.Label(
+            range_row, text="难度区间", bg=BG, fg=MUTED, font=(FONT, 9)
+        ).pack(side="left", padx=(0, 6))
+        tk.Label(
+            range_row, text="起始", bg=BG, fg=MUTED, font=(FONT, 8)
+        ).pack(side="left", padx=(0, 4))
+        tk.Entry(
+            range_row, textvariable=range_start_var, bg=SURFACE_2,
+            fg=TEXT, insertbackground=TEXT, relief="flat",
+            highlightthickness=1, highlightbackground=BORDER,
+            highlightcolor=PINK, font=(FONT, 10), width=6,
+        ).pack(side="left", ipady=5)
+        tk.Label(
+            range_row, text="—", bg=BG, fg=MUTED, font=(FONT, 10)
+        ).pack(side="left", padx=6)
+        tk.Label(
+            range_row, text="结束", bg=BG, fg=MUTED, font=(FONT, 8)
+        ).pack(side="left", padx=(0, 4))
+        tk.Entry(
+            range_row, textvariable=range_end_var, bg=SURFACE_2,
+            fg=TEXT, insertbackground=TEXT, relief="flat",
+            highlightthickness=1, highlightbackground=BORDER,
+            highlightcolor=PINK, font=(FONT, 10), width=6,
+        ).pack(side="left", ipady=5)
+        ttk.Button(
+            range_row, text="应用", style="Dark.TButton",
+            command=lambda: apply_range(),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            range_row, text="按技术重置", style="Dark.TButton",
+            command=lambda: reset_range_and_recompute(),
+        ).pack(side="left", padx=(6, 0))
+
         body = tk.Frame(win, bg=BG)
         body.pack(fill="both", expand=True, padx=24, pady=(0, 12))
         body.columnconfigure(0, weight=1)
@@ -1923,15 +1962,43 @@ class ScoreWallApp:
         )
         self._rec_images: list[ImageTk.PhotoImage] = []
 
+        def current_range() -> tuple[float, float] | None:
+            try:
+                start = float(range_start_var.get())
+                end = float(range_end_var.get())
+            except ValueError:
+                return None
+            if start < 0 or end <= start:
+                return None
+            return start, end
+
+        def set_default_range() -> None:
+            selected_mode = MODE_FILTERS.get(mode_var.get(), 0)
+            stars, _accuracy, _best = self._estimate_skill(selected_mode)
+            if stars > 0:
+                range_start_var.set(f"{max(0.0, stars - 0.8):.1f}")
+                range_end_var.set(f"{stars + 0.3:.1f}")
+            else:
+                range_start_var.set("")
+                range_end_var.set("")
+
         def recompute(_event=None) -> None:
             selected_mode = MODE_FILTERS.get(mode_var.get(), 0)
-            recommendations, skill = self._build_recommendations(selected_mode)
+            range_value = current_range()
+            if range_value is None:
+                count_var.set("难度区间无效")
+                return
+            start, end = range_value
+            recommendations, skill = self._build_recommendations(
+                selected_mode, start, end
+            )
             self._rec_recommendations = recommendations
             stars, accuracy, best_pp = skill
             if stars > 0:
                 skill_var.set(
                     f"技术估算：约 {stars:.2f}★  ·  典型准确率 {accuracy:.2f}%"
                     f"  ·  最高本地 PP {best_pp:.1f}"
+                    f"  ·  推荐区间 {start:.2f}–{end:.2f}★"
                 )
             else:
                 skill_var.set("当前模式没有可用于估算的本地成绩")
@@ -1941,7 +2008,26 @@ class ScoreWallApp:
                 canvas, recommendations, selected_mode
             )
 
-        mode_combo.bind("<<ComboboxSelected>>", recompute)
+        def apply_range() -> None:
+            if current_range() is None:
+                messagebox.showerror(
+                    "难度区间无效",
+                    "请输入有效的起始星级和结束星级，且结束星级必须大于起始星级。",
+                    parent=win,
+                )
+                return
+            recompute()
+
+        def reset_range_and_recompute() -> None:
+            set_default_range()
+            recompute()
+
+        def on_mode_change(_event=None) -> None:
+            set_default_range()
+            recompute()
+
+        mode_combo.bind("<<ComboboxSelected>>", on_mode_change)
+        set_default_range()
         recompute()
 
         footer = tk.Frame(win, bg=BG)
