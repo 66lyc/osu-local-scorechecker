@@ -15,7 +15,7 @@
 - 按歌曲、艺术家、难度、模组等关键词搜索
 - 按模式筛选：osu!standard / osu!taiko / osu!catch / osu!mania
 - 主界面默认显示 osu!standard，可在「设置」中切换默认模式并保存
-- 可获取 PP 查询：列出本地未提交的 Ranked 谱面成绩，并估算单曲原始 PP
+- 推分推荐：根据本地成绩估算技术水平，推荐可提升 PP 的 Ranked 谱面，并显示目标准确率和预计 PP
 - 主界面右侧常驻难度区间饼图，每 1.0 星一个区间
 - 支持手动输入起始等级和结束等级，例如起始 `4.0`、结束 `5.0` 表示 4.0 ≤ ★ < 5.0
 - osu!mania 模式下支持按 4K / 5K / 6K / 7K / 8K 等键数筛选
@@ -98,7 +98,7 @@ Copy-Item config.example.json config.json
 
 - `scores.db`：本地成绩
 - `Songs/**/*.osu`：谱面标题、艺术家、难度、封面等信息
-- `osu!.db`：谱面星级、ranked 状态和 mania 键数信息，用于星级区间饼图、键数筛选和 PP 查询
+- `osu!.db`：谱面星级、ranked 状态和 mania 键数信息，用于星级区间饼图、键数筛选和推分推荐
 
 本软件只读取本地文件，不会上传任何成绩或游戏数据。
 
@@ -108,7 +108,7 @@ Copy-Item config.example.json config.json
 osu成绩墙/
 ├─ main.py                 # Tkinter 界面与卡片墙
 ├─ osu_data.py             # scores.db 解析、谱面扫描与缓存
-├─ pp_calc.py              # 使用 rosu-pp 估算单曲 PP
+├─ pp_calc.py              # 使用 rosu-pp 估算单曲 PP 和推分目标
 ├─ run.bat                 # Windows 启动脚本
 ├─ requirements.txt        # Python 依赖
 ├─ config.example.json     # 配置示例
@@ -151,16 +151,22 @@ Songs/
 
 请确认 osu! 目录中存在 `osu!.db`，然后点击主界面的「重新扫描谱面」。
 
-### 可获取 PP 的统计口径
+### 推分推荐的统计口径
 
-点击右上角「可获取PP」后，软件会统计：
+点击右上角「推分推荐」后，软件会：
 
-- 当前模式的本地成绩
-- `online_id` 为 0 的未提交成绩
-- `osu!.db` 中 Ranked / Approved / Qualified 状态的谱面
-- 使用 `rosu-pp-py` 估算每张谱面的单曲原始 PP
+- 使用当前模式下本地成绩估算技术水平
+  - 参考前 20 条最高估算 PP 的成绩
+  - 加权计算等效星级和典型准确率
+- 在 Ranked / Approved / Qualified 谱面中寻找接近当前技术水平的谱面
+- 为每张谱面计算一个推荐目标：
+  - 目标准确率
+  - 非 mania 模式按 95% 最大连击估算
+  - 假设无模组 NM
+- 显示目标准确率、预计 PP、本地最佳 PP 和预计提升
+- 点击推荐卡片可以查看 90%–100% 各准确率分别能获得多少 PP
 
-注意：单曲 PP 估算不等于账号总 PP 会增加相同数值。最终是否提升总 PP，还要看线上个人最佳成绩、总 PP 权重和成绩是否成功提交。
+注意：这里的 PP 是单曲原始 PP 估算，不等于账号总 PP 会增加相同数值。最终是否提升总 PP，还要看线上个人最佳成绩、总 PP 权重和成绩是否成功提交。
 
 ### 是否支持 osu!lazer？
 

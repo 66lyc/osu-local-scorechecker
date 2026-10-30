@@ -65,3 +65,40 @@ class PPCalculator:
             return float(self._difficulty_cache[key].stars)
         except Exception:
             return None
+
+    def preview(
+        self,
+        beatmap_info,
+        accuracy: float,
+        mods: int = 0,
+        combo_ratio: float = 0.95,
+    ) -> tuple[float, float, int] | None:
+        """Return (estimated pp, stars, max combo) for a target accuracy."""
+        if rosu is None or beatmap_info is None:
+            return None
+        path = Path(beatmap_info.path)
+        if not path.exists():
+            return None
+        key = (str(path), mods)
+        try:
+            if key not in self._difficulty_cache:
+                beatmap = rosu.Beatmap(path=str(path))
+                attributes = rosu.Difficulty(mods=mods).calculate(beatmap)
+                self._difficulty_cache[key] = attributes
+            attributes = self._difficulty_cache[key]
+            combo = None
+            if int(getattr(beatmap_info, "mode", 0)) != 3:
+                combo = max(1, int(attributes.max_combo * combo_ratio))
+            performance = rosu.Performance(
+                mods=mods,
+                accuracy=accuracy,
+                combo=combo,
+                lazer=False,
+            ).calculate(attributes)
+            return (
+                float(performance.pp),
+                float(attributes.stars),
+                int(attributes.max_combo),
+            )
+        except Exception:
+            return None

@@ -210,6 +210,7 @@ class ScoreWallApp:
         self._current_detail: tk.Toplevel | None = None
         self._current_history: tk.Toplevel | None = None
         self._current_pp_window: tk.Toplevel | None = None
+        self._current_pp_detail: tk.Toplevel | None = None
         self.pp_calculator = PPCalculator()
 
         self._configure_root()
@@ -386,9 +387,9 @@ class ScoreWallApp:
             command=self.refresh_scores,
         ).pack(side="left", padx=(0, 8))
         ttk.Button(
-            actions, text="可获取PP", image=self._button_icons["pp"],
+            actions, text="推分推荐", image=self._button_icons["pp"],
             compound="left", style="Dark.TButton",
-            command=self.open_pp_opportunities,
+            command=self.open_pp_recommendations,
         ).pack(side="left", padx=(0, 8))
         ttk.Button(
             actions, text="重新扫描谱面", image=self._button_icons["scan"],
@@ -1650,11 +1651,212 @@ class ScoreWallApp:
         ).pack(side="right")
         win.focus_set()
 
-    def open_pp_opportunities(self) -> None:
+    def _estimate_skill(self, mode: int) -> tuple[float, float, float]:
+        values: list[tuple[float, Score, float]] = []
+        for score in self.scores:
+            if score.mode != mode:
+                continue
+            pp_value = self.pp_calculator.calculate(score)
+            if pp_value is None or pp_value <= 0:
+                continue
+            stars = self.pp_calculator.stars(score)
+            if stars is None or stars <= 0:
+                continue
+            values.append((pp_value, score, stars))
+        if not values:
+            return 0.0, 0.0, 0.0
+
+        values.sort(key=lambda item: item[0], reverse=True)
+        top = values[:20]
+        weight = sum(item[0] for item in top)
+        if weight <= 0:
+            return 0.0, 0.0, 0.0
+        skill_stars = sum(item[2] * item[0] for item in top) / weight
+        skill_accuracy = sum(item[1].accuracy * item[0] for item in top) / weight
+        return skill_stars, skill_accuracy, top[0][0]
+
+    def _build_recommendations(
+        self, mode: int
+    ) -> tuple[list[dict], tuple[float, float, float]]:
+        skill_stars, skill_accuracy, best_pp = self._estimate_skill(mode)
+        if skill_stars <= 0:
+            return [], (skill_stars, skill_accuracy, best_pp)
+
+        wanted_keys: int | None = None
+        if mode == 3 and self.mania_keys_var.get() != "全部键数":
+            try:
+                wanted_keys = int(self.mania_keys_var.get()[:-1])
+            except ValueError:
+                wanted_keys = None
+
+        local_best: dict[str, float] = {}
+        for score in self.scores:
+            if score.mode != mode:
+                continue
+            pp_value = self.pp_calculator.calculate(score)
+            if pp_value is None or pp_value <= 0:
+                continue
+            previous = local_best.get(score.beatmap_md5, 0.0)
+            if pp_value > previous:
+                local_best[score.beatmap_md5] = pp_value
+
+        lower = max(0.0, skill_stars - 1.2)
+        upper = skill_stars + 1.2
+        recommendations: list[dict] = []
+
+        for beatmap in self.beatmaps.values():
+            if beatmap.mode != mode:
+                continue
+            if beatmap.ranked_status not in (3, 4, 5):
+                continue
+            if wanted_keys is not None and beatmap.key_count != wanted_keys:
+                continue
+            if beatmap.star_rating <= 0:
+                continue
+            if not (lower <= beatmap.star_rating <= upper):
+                continue
+
+            target_accuracy = min(
+                99.5,
+                max(
+                    90.0,
+                    skill_accuracy + (skill_stars - beatmap.star_rating) * 1.5,
+                ),
+            )
+            preview = self.pp_calculator.preview(
+                beatmap, target_accuracy, mods=0, combo_ratio=0.95
+            )
+            if preview is None:
+                continue
+            target_pp, stars, max_combo = preview
+            current_pp = local_best.get(beatmap.md5, 0.0)
+            gain = target_pp - current_pp
+            if gain <= 0.5:
+                continue
+            recommendations.append({
+                "beatmap": beatmap,
+                "target_accuracy": target_accuracy,
+                "target_pp": target_pp,
+                "current_pp": current_pp,
+                "gain": gain,
+                "stars": stars,
+                "max_combo": max_combo,
+            })
+
+        recommendations.sort(
+            key=lambda item: (item["gain"], item["target_pp"]),
+            reverse=True,
+        )
+        return recommendations[:48], (skill_stars, skill_accuracy, best_pp)
+
+    def _draw_recommendation_cards(
+        self, canvas: tk.Canvas, recommendations: list[dict], mode: int
+    ) -> None:
+        canvas.delete("all")
+        self._rec_images.clear()
+        width = max(canvas.winfo_width(), 1000)
+        card_w = 340
+        card_h = 176
+        gap = 14
+        margin = 20
+        columns = 3
+        grid_width = columns * card_w + (columns - 1) * gap
+        x0 = max(margin, (width - grid_width) // 2)
+        rows = math.ceil(len(recommendations) / columns) if recommendations else 0
+        content_height = (
+            2 * margin + rows * (card_h + gap) - gap if rows else 200
+        )
+        canvas.configure(scrollregion=(0, 0, width, content_height))
+
+        if not recommendations:
+            canvas.create_text(
+                width // 2, 110,
+                text="当前没有找到适合推分的 Ranked 谱面\n"
+                     "可能本地成绩不足，或当前模式没有合适的谱面",
+                fill=MUTED, font=(FONT, 12, "bold"), justify="center",
+            )
+            return
+
+        for index, recommendation in enumerate(recommendations):
+            row, column = divmod(index, columns)
+            x = x0 + column * (card_w + gap)
+            y = margin + row * (card_h + gap)
+            beatmap = recommendation["beatmap"]
+            photo = ImageTk.PhotoImage(self._render_art(
+                beatmap.background, beatmap.md5,
+                card_w, card_h, mode, radius=14,
+            ))
+            self._rec_images.append(photo)
+            tag = f"rec_{index}"
+            canvas.create_image(
+                x, y, image=photo, anchor="nw", tags=("rec", tag)
+            )
+            canvas.create_text(
+                x + 12, y + 10, anchor="nw",
+                text=f"{mode_short(mode)}  ·  ★ {recommendation['stars']:.2f}",
+                fill=GOLD, font=(FONT, 8, "bold"), tags=("rec", tag),
+            )
+            canvas.create_text(
+                x + 12, y + 34, anchor="nw",
+                text=self._ellipsize(
+                    beatmap.display_title, self.font_title, card_w - 24
+                ),
+                fill=TEXT, font=self.font_title, tags=("rec", tag),
+            )
+            canvas.create_text(
+                x + 12, y + 56, anchor="nw",
+                text=self._ellipsize(
+                    f"{beatmap.display_artist} · [{beatmap.version}]",
+                    self.font_small, card_w - 24,
+                ),
+                fill="#c6c6d2", font=self.font_small, tags=("rec", tag),
+            )
+            canvas.create_text(
+                x + 12, y + 82, anchor="nw",
+                text=f"目标准确率 {recommendation['target_accuracy']:.1f}%"
+                     f"  ·  {'MAX' if mode == 3 else '95% 连击'}",
+                fill=CYAN, font=(FONT, 8, "bold"), tags=("rec", tag),
+            )
+            canvas.create_text(
+                x + 12, y + 105, anchor="nw",
+                text=f"预计获得 {recommendation['target_pp']:.1f}pp",
+                fill=GOLD, font=(FONT, 12, "bold"), tags=("rec", tag),
+            )
+            current_pp = recommendation["current_pp"]
+            local_text = (
+                "本地暂无成绩"
+                if current_pp <= 0
+                else f"本地最佳 {current_pp:.1f}pp  ·  可提升 {recommendation['gain']:.1f}pp"
+            )
+            canvas.create_text(
+                x + 12, y + 136, anchor="nw",
+                text=local_text,
+                fill=GREEN if current_pp <= 0 or recommendation["gain"] > 0 else MUTED,
+                font=(FONT, 8), tags=("rec", tag),
+            )
+            canvas.create_text(
+                x + 12, y + 154, anchor="nw",
+                text=f"[{beatmap.version}]",
+                fill=PINK, font=(FONT, 7), tags=("rec", tag),
+            )
+            canvas.tag_bind(
+                tag, "<Button-1>",
+                lambda _event, item=recommendation: self._open_pp_ladder(item),
+            )
+            canvas.tag_bind(
+                tag, "<Enter>",
+                lambda _event: canvas.configure(cursor="hand2"),
+            )
+            canvas.tag_bind(
+                tag, "<Leave>",
+                lambda _event: canvas.configure(cursor=""),
+            )
+
+    def open_pp_recommendations(self) -> None:
         if not self.pp_calculator.available:
             messagebox.showerror(
                 "缺少依赖",
-                "PP 估算需要安装 rosu-pp-py：\n"
+                "推分推荐需要安装 rosu-pp-py：\n"
                 "python -m pip install rosu-pp-py",
                 parent=self.root,
             )
@@ -1669,10 +1871,10 @@ class ScoreWallApp:
 
         win = tk.Toplevel(self.root)
         self._current_pp_window = win
-        win.title("可获取 PP 的本地 Ranked 成绩")
+        win.title("推分推荐")
         win.configure(bg=BG)
-        win.geometry("1080x640")
-        win.minsize(860, 520)
+        win.geometry("1220x800")
+        win.minsize(980, 600)
         win.transient(self.root)
         win.bind("<Escape>", lambda _event: win.destroy())
 
@@ -1680,13 +1882,13 @@ class ScoreWallApp:
         header.pack(fill="x", padx=24, pady=(18, 8))
         header.columnconfigure(0, weight=1)
         tk.Label(
-            header, text="可获取 PP 的本地 Ranked 成绩", bg=BG, fg=TEXT,
-            font=(FONT, 18, "bold"), anchor="w",
+            header, text="推分推荐", bg=BG, fg=TEXT,
+            font=(FONT, 20, "bold"), anchor="w",
         ).grid(row=0, column=0, sticky="w")
+        skill_var = tk.StringVar()
         tk.Label(
-            header,
-            text="仅统计本地未提交成绩；PP 为单曲原始估算，实际总 PP 取决于线上个人最佳成绩",
-            bg=BG, fg=MUTED, font=(FONT, 8), anchor="w",
+            header, textvariable=skill_var, bg=BG, fg=MUTED,
+            font=(FONT, 9), anchor="w",
         ).grid(row=1, column=0, sticky="w", pady=(2, 0))
 
         mode_var = tk.StringVar(value=self.mode_var.get())
@@ -1695,46 +1897,124 @@ class ScoreWallApp:
             state="readonly", style="Dark.TCombobox", width=14,
         )
         mode_combo.grid(row=1, column=1, sticky="e")
-
-        summary_var = tk.StringVar()
+        count_var = tk.StringVar()
         tk.Label(
-            header, textvariable=summary_var, bg=BG, fg=GOLD,
+            header, textvariable=count_var, bg=BG, fg=GOLD,
             font=(FONT, 9, "bold"), anchor="e",
         ).grid(row=0, column=1, sticky="e", pady=(0, 24))
+
+        body = tk.Frame(win, bg=BG)
+        body.pack(fill="both", expand=True, padx=24, pady=(0, 12))
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(0, weight=1)
+        canvas = tk.Canvas(body, bg=BG, highlightthickness=0, bd=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(
+            body, orient="vertical", command=canvas.yview,
+            style="Vertical.TScrollbar",
+        )
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.bind(
+            "<MouseWheel>",
+            lambda event: canvas.yview_scroll(
+                int(-event.delta / 120) if event.delta else -1, "units"
+            ),
+        )
+        self._rec_images: list[ImageTk.PhotoImage] = []
+
+        def recompute(_event=None) -> None:
+            selected_mode = MODE_FILTERS.get(mode_var.get(), 0)
+            recommendations, skill = self._build_recommendations(selected_mode)
+            self._rec_recommendations = recommendations
+            stars, accuracy, best_pp = skill
+            if stars > 0:
+                skill_var.set(
+                    f"技术估算：约 {stars:.2f}★  ·  典型准确率 {accuracy:.2f}%"
+                    f"  ·  最高本地 PP {best_pp:.1f}"
+                )
+            else:
+                skill_var.set("当前模式没有可用于估算的本地成绩")
+            count_var.set(f"{len(recommendations)} 个推荐谱面")
+            canvas.update_idletasks()
+            self._draw_recommendation_cards(
+                canvas, recommendations, selected_mode
+            )
+
+        mode_combo.bind("<<ComboboxSelected>>", recompute)
+        recompute()
+
+        footer = tk.Frame(win, bg=BG)
+        footer.pack(fill="x", padx=24, pady=(0, 16))
+        tk.Label(
+            footer,
+            text="推荐目标假设：无模组 NM，非 mania 模式按 95% 最大连击估算；实际 PP 以官方提交结果为准",
+            bg=BG, fg=MUTED, font=(FONT, 8), anchor="w",
+        ).pack(side="left")
+        ttk.Button(
+            footer, text="关闭", style="Accent.TButton",
+            command=win.destroy,
+        ).pack(side="right")
+        win.focus_set()
+
+    def _open_pp_ladder(self, recommendation: dict) -> None:
+        beatmap = recommendation["beatmap"]
+        mode = beatmap.mode
+        if self._current_pp_detail is not None:
+            try:
+                if self._current_pp_detail.winfo_exists():
+                    self._current_pp_detail.destroy()
+            except tk.TclError:
+                pass
+
+        win = tk.Toplevel(self.root)
+        self._current_pp_detail = win
+        win.title("推分详情 - " + beatmap.display_title)
+        win.configure(bg=BG)
+        win.geometry("780x650")
+        win.minsize(680, 560)
+        win.transient(self.root)
+        win.bind("<Escape>", lambda _event: win.destroy())
+
+        header = tk.Frame(win, bg=BG)
+        header.pack(fill="x", padx=24, pady=(18, 8))
+        tk.Label(
+            header, text=beatmap.display_title, bg=BG, fg=TEXT,
+            font=(FONT, 17, "bold"), anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            header,
+            text=f"{beatmap.display_artist}  ·  [{beatmap.version}]  ·  ★ {recommendation['stars']:.2f}",
+            bg=BG, fg=MUTED, font=(FONT, 9), anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+        tk.Label(
+            header,
+            text=f"推荐目标：{recommendation['target_accuracy']:.1f}%"
+                 f"  →  {recommendation['target_pp']:.1f}pp"
+                 f"  ·  本地最佳：{recommendation['current_pp']:.1f}pp",
+            bg=BG, fg=GOLD, font=(FONT, 10, "bold"), anchor="w",
+        ).pack(fill="x", pady=(8, 0))
 
         table_card = tk.Frame(
             win, bg=SURFACE,
             highlightbackground=BORDER, highlightthickness=1, bd=0,
         )
-        table_card.pack(fill="both", expand=True, padx=24)
+        table_card.pack(fill="both", expand=True, padx=24, pady=(8, 8))
         table_card.columnconfigure(0, weight=1)
         table_card.rowconfigure(0, weight=1)
 
-        columns = (
-            "title", "difficulty", "stars", "score",
-            "accuracy", "rank", "mods", "pp", "time",
-        )
         tree = ttk.Treeview(
-            table_card, columns=columns, show="headings",
-            selectmode="browse", style="History.Treeview",
+            table_card,
+            columns=("accuracy", "combo", "pp"),
+            show="headings", selectmode="browse",
+            style="History.Treeview",
         )
-        headings = {
-            "title": "谱面", "difficulty": "难度", "stars": "星级",
-            "score": "分数", "accuracy": "准确率", "rank": "评级",
-            "mods": "模组", "pp": "预计PP", "time": "时间",
-        }
-        widths = {
-            "title": 230, "difficulty": 130, "stars": 65,
-            "score": 90, "accuracy": 80, "rank": 55,
-            "mods": 80, "pp": 85, "time": 140,
-        }
-        for key in columns:
-            tree.heading(key, text=headings[key])
-            tree.column(
-                key, width=widths[key], minwidth=50,
-                anchor="e" if key in ("score", "pp", "stars") else "center"
-                if key != "title" else "w",
-            )
+        tree.heading("accuracy", text="目标准确率")
+        tree.heading("combo", text="目标连击")
+        tree.heading("pp", text="预计 PP")
+        tree.column("accuracy", width=140, anchor="center")
+        tree.column("combo", width=180, anchor="center")
+        tree.column("pp", width=140, anchor="e")
         scrollbar = ttk.Scrollbar(
             table_card, orient="vertical", command=tree.yview,
             style="Vertical.TScrollbar",
@@ -1742,87 +2022,45 @@ class ScoreWallApp:
         tree.configure(yscrollcommand=scrollbar.set)
         tree.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
-        tree.tag_configure("top_pp", foreground=GOLD)
+        tree.tag_configure("target", foreground=GOLD)
 
-        rows: list[tuple[float, Score]] = []
-
-        def refresh(_event=None) -> None:
-            selected_mode = MODE_FILTERS.get(mode_var.get(), 0)
-            best_by_map: dict[str, tuple[float, Score]] = {}
-            for score in self.scores:
-                if score.mode != selected_mode:
-                    continue
-                beatmap = score.beatmap
-                if beatmap is None:
-                    continue
-                if beatmap.ranked_status not in (3, 4, 5):
-                    continue
-                if score.online_id != 0:
-                    continue
-                pp_value = self.pp_calculator.calculate(score)
-                if pp_value is None or pp_value <= 0:
-                    continue
-                current = best_by_map.get(beatmap.md5)
-                if current is None or pp_value > current[0]:
-                    best_by_map[beatmap.md5] = (pp_value, score)
-
-            nonlocal rows
-            rows = sorted(
-                best_by_map.values(), key=lambda item: item[0], reverse=True
+        target_row_id = None
+        for accuracy in (90, 92, 94, 95, 96, 97, 98, 99, 100):
+            preview = self.pp_calculator.preview(
+                beatmap, float(accuracy), mods=0, combo_ratio=0.95
             )
-            tree.delete(*tree.get_children())
-            for index, (pp_value, score) in enumerate(rows):
-                beatmap = score.beatmap
-                tree.insert(
-                    "", "end", iid=str(index),
-                    values=(
-                        beatmap.display_title if beatmap else "未知谱面",
-                        beatmap.version if beatmap else "-",
-                        f"{beatmap.star_rating:.2f}" if beatmap and beatmap.star_rating else "-",
-                        f"{score.score:,}",
-                        f"{score.accuracy:.2f}%",
-                        score.rank,
-                        score.mods_label,
-                        f"{pp_value:.2f}",
-                        score.when.strftime("%Y-%m-%d %H:%M"),
-                    ),
-                    tags=("top_pp",) if index == 0 else (),
-                )
+            if preview is None:
+                continue
+            pp_value, _stars, max_combo = preview
+            combo_text = "—" if mode == 3 else f"{int(max_combo * 0.95):,} (95%)"
+            row_id = tree.insert(
+                "", "end",
+                values=(f"{accuracy:.1f}%", combo_text, f"{pp_value:.2f}"),
+            )
+            if abs(accuracy - recommendation["target_accuracy"]) < 0.75:
+                tree.item(row_id, tags=("target",))
+                target_row_id = row_id
+        if target_row_id is not None:
+            tree.selection_set(target_row_id)
+            tree.focus(target_row_id)
 
-            if rows:
-                top_pp = rows[0][0]
-                average_pp = sum(item[0] for item in rows) / len(rows)
-                summary_var.set(
-                    f"{len(rows)} 张候选谱面 · 最高 {top_pp:.2f}pp · 平均 {average_pp:.2f}pp"
-                )
-                tree.selection_set("0")
-            else:
-                summary_var.set("没有找到未提交的 Ranked 成绩")
-
-        def open_selected() -> None:
-            selection = tree.selection()
-            if not selection:
-                messagebox.showinfo(
-                    "提示", "请先选择一条成绩。", parent=win
-                )
-                return
-            self.show_score_detail(rows[int(selection[0])][1])
-
-        tree.bind("<Double-1>", lambda _event: open_selected())
-        tree.bind("<Return>", lambda _event: open_selected())
-        mode_combo.bind("<<ComboboxSelected>>", refresh)
-        refresh()
+        tk.Label(
+            win,
+            text="PP 估算假设：无模组 NM；非 mania 模式按 95% 最大连击。实际总 PP 还取决于线上个人最佳成绩。",
+            bg=BG, fg=MUTED, font=(FONT, 8), anchor="w",
+        ).pack(fill="x", padx=24, pady=(4, 4))
 
         buttons = tk.Frame(win, bg=BG)
-        buttons.pack(fill="x", padx=24, pady=14)
+        buttons.pack(fill="x", padx=24, pady=(0, 16))
         ttk.Button(
-            buttons, text="打开选中成绩详情", style="Dark.TButton",
-            command=open_selected,
+            buttons, text="打开谱面文件夹", style="Dark.TButton",
+            command=lambda: self._open_folder(beatmap.folder),
         ).pack(side="left")
         ttk.Button(
             buttons, text="关闭", style="Accent.TButton",
             command=win.destroy,
         ).pack(side="right")
+        win.lift()
         win.focus_set()
 
     @staticmethod
