@@ -128,6 +128,24 @@ osu成绩墙/
 - `__pycache__/`
 - `preview*.png`
 
+## 单文件打包版
+
+已生成可直接发送的 Windows 单文件版：
+
+```text
+C:\Users\66lyc\Desktop\osu成绩墙_单文件版.exe
+```
+
+特点：
+
+- 只需要发送这一个 `.exe` 文件
+- 对方电脑不需要安装 Python、Pillow、Matplotlib 或 rosu-pp-py
+- 第一次启动会稍慢，需要解压运行环境
+- 会在 exe 同目录生成 `config.json` 和 `beatmap_cache.json`
+- 这是未签名程序，Windows SmartScreen 可能提示风险，需要选择「更多信息 → 仍要运行」
+
+如果聊天软件不允许发送 `.exe`，可以先把 exe 压缩成 zip 再发送。
+
 ## 常见问题
 
 ### 启动时提示找不到 osu! 目录

@@ -32,3 +32,8 @@ dist/
 *.spec
 *.csv
 
+
+# Packaged executables
+*.exe
+release/
+
